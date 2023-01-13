@@ -47,7 +47,7 @@ class SingleChanDenoiser(nn.Module):
         self.load_state_dict(checkpoint)
         return self
 
-    def train(self, fname_save, DenoTD, n_train=50000, n_test=500, EPOCH=2000, BATCH_SIZE=512, LR=0.0001):
+    def train(self, fname_save, DenoTD, n_train=10000, n_test=500, EPOCH=2000, BATCH_SIZE=512, LR=0.0001):
         """
         DenoTD instance of Denoise Training Data class
         """
@@ -68,21 +68,22 @@ class SingleChanDenoiser(nn.Module):
         # training and testing
         for epoch in range(EPOCH):
             for step, (b_x, b_y) in enumerate(train_loader):   # gives batch data, normalize x when iterate train_loader
-                est = self(b_x.cuda())[0] 
-                loss = loss_func(est, b_y.cuda())   # cross entropy loss b_y.cuda()
+                est = self(b_x)
+                loss = loss_func(est, b_y)   # cross entropy loss b_y.cuda()
                 optimizer.zero_grad()           # clear gradients for this training step
                 loss.backward()                 # backpropagation, compute gradients
                 optimizer.step()                # apply gradients
 
                 if step % 100 == 0:
-                    est_test = self(torch.FloatTensor(wf_col_test).cuda())[0]
+                    est_test = self(torch.FloatTensor(wf_col_test))[0]
                     l2_loss = np.mean(np.square(est_test.cpu().data.numpy() - wf_clean_test))
-                    print('Epoch: ', epoch, '| train loss: %.4f' % loss.cpu().data.numpy(), '| test accuracy: %.4f' % l2_loss)
+                    print('Epoch: ', epoch, '| train loss: %.4f' % loss.cpu().data.numpy(), '| l2 loss: %.4f' % l2_loss)
 
         # save model
         torch.save(self.state_dict(), fname_save)
 
 
+# +
 class Denoising_Training_Data(object):
     """
     templates obtained by simple clustering + averaging waveforms + crop and align
@@ -103,8 +104,10 @@ class Denoising_Training_Data(object):
         self.spike_size = self.temporal_sig.shape[0]
         self.geom = geom_array
 
-        self.templates, self.n_before, self.n_after = crop_and_align_templates(self.templates, self.spike_size, self.channel_index, self.geom)
-        self.templates = denoise_templates(self.templates)
+        print("no cropping")
+        # Replace this step by manually curating templates
+#         self.templates, self.n_before, self.n_after = crop_and_align_templates(self.templates, self.spike_size, self.channel_index, self.geom)
+#         self.templates = denoise_templates(self.templates)
 
         self.templates = self.templates.transpose(0,2,1).reshape(
             -1, self.templates.shape[1])
@@ -117,18 +120,18 @@ class Denoising_Training_Data(object):
     def remove_small_templates(self):
 
         ptp = self.templates.ptp(1)
-        self.templates = self.templates[ptp > 3]
+        self.templates = self.templates[ptp > 2]
 
     def standardize_templates(self):
 
         # standardize templates
-        ptp = self.templates.ptp(1)
+        ptp = np.abs(self.templates).max(1)
         self.templates = self.templates/ptp[:, None]
 
-        ref = np.mean(self.templates, 0)
-        shifts = align_get_shifts_with_ref(
-            self.templates, ref)
-        self.templates = shift_chans(self.templates, shifts)
+#         ref = np.mean(self.templates, 0)
+#         shifts = align_get_shifts_with_ref(
+#             self.templates, ref)
+#         self.templates = shift_chans(self.templates, shifts)
 
     def jitter_templates(self, up_factor=8):
 
@@ -206,12 +209,13 @@ class Denoising_Training_Data(object):
         wf_clean = wf_clean[:, t_idx_in]
         return (wf_clean + wf_col[:, t_idx_in] + noise_wf,
                 wf_clean)
+# -
 
 
-        
-        
-        
-        
+
+
+
+
 def denoise_wf_nn_single_channel(wf, denoiser, device):
     """
     This function NN-denoises waveform arrays 
@@ -378,6 +382,7 @@ def order_channels_by_distance(reference, channels, geom):
     return channels[idx], idx
 
 
+# +
 def crop_and_align_templates(templates, spike_size, channel_index, geom):
     """Crop (spatially) and align (temporally) templates
     Parameters
@@ -401,13 +406,13 @@ def crop_and_align_templates(templates, spike_size, channel_index, geom):
     upsample_factor = 8
     nshifts = spike_size//2
 
-    shifts = align_get_shifts_with_ref(
-        templates_max_channel, ref, upsample_factor, nshifts)
+#     shifts = align_get_shifts_with_ref(
+#         templates_max_channel, ref, upsample_factor, nshifts)
 
-    templates_aligned = shift_chans(templates, shifts)
+#     templates_aligned = shift_chans(templates, shifts)
     
-    # crop out the edges since they have bad artifacts
-    templates_aligned = templates_aligned[:, nshifts//2:-nshifts//2]
+#     # crop out the edges since they have bad artifacts
+#     templates_aligned = templates_aligned[:, nshifts//2:-nshifts//2]
 
     ########## Find High Energy Center of Templates #################
 
@@ -434,7 +439,7 @@ def crop_and_align_templates(templates, spike_size, channel_index, geom):
     templates_aligned_bis = templates_aligned_bis[templates_aligned_bis.ptp(1).max(1)>0]
     ########## spatially crop (only keep neighbors) #################
 
-    neighbors = channel_index #0/1 mask array shape 32*32#Channel Index 
+    neighbors = channel_index #0/1 mask array shape N*N #Channel Index 
     n_neigh = np.max(np.sum(neighbors, axis=1))
     templates_cropped = np.zeros((n_units-n_units_bad, spike_size, n_neigh))
 
@@ -451,15 +456,19 @@ def crop_and_align_templates(templates, spike_size, channel_index, geom):
 
     return templates_cropped, n_before_trough, n_after_trough
 
+
+# +
 def denoise_templates(templates):
 
     n_templates, n_times, n_chan = templates.shape
 
-    # remove templates with ptp < 5 (if there are enough templates)
-    ptps = templates.ptp(1).max(1)
-    if np.sum(ptps > 5) > 100:
-        templates = templates[ptps>5]
-        n_templates = templates.shape[0]
+#     # remove templates with ptp < 5 (if there are enough templates)
+#     ptps = templates.ptp(1).max(1)
+#     if np.sum(ptps > 5) > 100:
+#         templates = templates[ptps>5]
+#         n_templates = templates.shape[0]
+    
+    
 
     denoised_templates = np.zeros(templates.shape)
 
